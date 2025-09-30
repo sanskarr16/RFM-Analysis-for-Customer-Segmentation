@@ -1,0 +1,185 @@
+ALTER TABLE online_retail
+RENAME COLUMN `Customer ID` TO customerid;
+
+select count(customerid) from online_retail;
+
+# Total Revenue
+SELECT
+    CAST(SUM(TotalSales) / 1000000 AS DECIMAL(10, 2)) AS Total_Revenue_Millions
+FROM
+    online_retail; 
+    
+# Total Unique Customers
+select count(distinct customerid) as Total_Unique_customer;
+
+#Average Order Value(AOV)
+Select 
+cast(sum(totalsales) / count(distinct Invoice) as decimal(10,2)) as Average_order_value
+from online_retail;
+
+#Average Purchase Frequency
+# How many times, on average, a single customer makes a purchase.
+SELECT ROUND(
+    CAST(COUNT(DISTINCT Invoice) AS DECIMAL(10,2)) /
+    CAST(COUNT(DISTINCT CustomerID) AS DECIMAL(10,2)), 2
+) AS Average_purchase_frequency
+FROM online_retail;
+ 
+ # Customer Lifetime Values
+ # KPI estimates the total revenue an average customer will generate
+ select
+   cast(sum(totalsales) / count(distinct customerid) as decimal(10,2)) as Simplified_CLV
+   from online_retail;
+
+# Customer Acquisition Cost(CAC)   
+#average cost to acquire a new customer, we can track the number of new customers acquired each month as a foundational metric.
+#An organization needs to know if the cost to acquire a customer is less than the value they generate.
+
+WITH FirstPurchase AS (
+    SELECT
+        customerid,
+        -- Corrected Line: Tell SQL the exact format is Day-Month-Year
+        MIN(STR_TO_DATE(InvoiceDate, '%d-%m-%Y')) AS FirstPurchaseDate
+    FROM
+        online_retail -- <-- Your table name
+    WHERE customerid IS NOT NULL
+    GROUP BY
+        customerid
+)
+SELECT
+    DATE_FORMAT(FirstPurchaseDate, '%Y-%m') AS AcquisitionMonth,
+    COUNT(customerid) AS new_customer
+FROM
+    FirstPurchase
+WHERE
+    FirstPurchaseDate IS NOT NULL
+GROUP BY
+    AcquisitionMonth
+ORDER BY
+    AcquisitionMonth;
+    
+#Cohort Retention Rate
+#what percentage of new customers from a specific month return to make purchases in subsequent months. 
+#It's the ultimate measure of customer loyalty.
+
+With MonthlyCohort as(
+     select
+         customerid,
+         MIN(STR_TO_DATE(InvoiceDate, '%d-%m-%Y')) as AcquisitionDate
+         from online_retail
+         group by customerid
+         ),
+         
+ActivityByMonth as(
+       select
+           customerid,
+           str_to_date(DATE_FORMAT(STR_TO_DATE(InvoiceDate, '%d-%m-%Y'), '%Y-%m-01'), '%Y-%m-%d') as ActivityMonth
+           from online_retail
+           group by 
+           customerid, ActivityMonth
+           ),
+CohortRetention AS(
+    select 
+         DATE_FORMAT(C.AcquisitionDate, '%Y-%m') as AcquisitionMonth,
+         (YEAR(A.ActivityMonth) - YEAR(C.AcquisitionDate)) * 12 + (MONTH(A.ActivityMonth) - MONTH(C.AcquisitionDate)) as CohortMonth,
+         count(distinct C.customerid) as RetainedCustomers
+         from 
+             MonthlyCohort as C
+		 left join 
+             ActivityByMonth A on C.customerid = A.customerid
+		 Group By 
+             AcquisitionMonth, CohortMonth
+)
+SELECT
+    AcquisitionMonth,
+    -- Get the initial size of each cohort (Month 0)
+    MAX(CASE WHEN CohortMonth = 0 THEN RetainedCustomers ELSE 0 END) AS NewCustomers,
+    -- Calculate the retention percentage for subsequent months
+    CAST(MAX(CASE WHEN CohortMonth = 1 THEN RetainedCustomers ELSE 0 END) * 100.0 / MAX(CASE WHEN CohortMonth = 0 THEN RetainedCustomers ELSE 1 END) AS DECIMAL(10,2)) AS Month1_Retention_Pct,
+    CAST(MAX(CASE WHEN CohortMonth = 2 THEN RetainedCustomers ELSE 0 END) * 100.0 / MAX(CASE WHEN CohortMonth = 0 THEN RetainedCustomers ELSE 1 END) AS DECIMAL(10,2)) AS Month2_Retention_Pct,
+    CAST(MAX(CASE WHEN CohortMonth = 3 THEN RetainedCustomers ELSE 0 END) * 100.0 / MAX(CASE WHEN CohortMonth = 0 THEN RetainedCustomers ELSE 1 END) AS DECIMAL(10,2)) AS Month3_Retention_Pct
+FROM
+    CohortRetention
+GROUP BY
+    AcquisitionMonth
+ORDER BY
+    AcquisitionMonth;
+         
+         
+# RFM - Segementation    
+CREATE TABLE rfm_analysis AS(     
+WITH rfm_base AS (
+    -- Step 1: Calculate raw R, F, M values for each customer
+    SELECT
+        customerid,
+        DATEDIFF('2011-12-10', MAX(STR_TO_DATE(InvoiceDate, '%d-%m-%Y'))) AS Recency,
+        COUNT(DISTINCT Invoice) AS Frequency,
+        SUM(TotalSales) AS Monetary
+    FROM
+        online_retail -- Make sure this is your clean table name
+    GROUP BY
+        customerid
+),
+rfm_scores AS (
+    -- Step 2: Score each customer from 1 to 4
+    SELECT
+        customerid,
+        Recency,
+        Frequency,
+        Monetary,
+        NTILE(4) OVER (ORDER BY Recency DESC) AS R_Score,
+        NTILE(4) OVER (ORDER BY Frequency ASC) AS F_Score,
+        NTILE(4) OVER (ORDER BY Monetary ASC) AS M_Score
+    FROM
+        rfm_base
+),
+rfm_final AS (
+    -- Step 3: Concatenate the scores
+    SELECT
+        *,
+        CONCAT(R_Score, F_Score, M_Score) AS RFM_Score
+    FROM
+        rfm_scores
+)
+-- Step 4: Assign a segment name based on the score
+SELECT
+    *,
+    CASE
+        WHEN RFM_Score IN ('444', '434', '344') THEN 'Champions'
+        WHEN RFM_Score IN ('334', '343', '433', '443') THEN 'Loyal Customers'
+        WHEN RFM_Score IN ('422', '423', '432', '322') THEN 'Potential Loyalists'
+        WHEN RFM_Score IN ('441', '431', '341', '331') THEN 'New Customers'
+        WHEN RFM_Score IN ('323', '333', '321') THEN 'Promising'
+        WHEN RFM_Score IN ('233', '234', '244', '134', '144') THEN 'Customers Needing Attention'
+        WHEN RFM_Score IN ('222', '221', '212', '122', '112', '121') THEN 'At-Risk'
+        WHEN RFM_Score IN ('111', '123', '132', '133') THEN 'Hibernating'
+        WHEN RFM_Score IN ('211', '121', '112', '113') THEN 'Lost'
+        ELSE 'Other'
+    END AS RFM_Segment
+FROM
+    rfm_final
+    );
+    
+# Customer Count per segement
+SELECT
+    RFM_Segment,
+    COUNT(customerid) AS Customer_Count
+FROM
+    rfm_analysis
+GROUP BY
+    RFM_Segment
+ORDER BY
+    Customer_Count DESC;
+    
+#Revenue Contribution per Segment
+-- This query also uses the final 'rfm_analysis' table
+SELECT
+    RFM_Segment,
+    CAST(SUM(Monetary) AS DECIMAL(12,2)) AS Total_Revenue,
+    CAST(SUM(Monetary) * 100.0 / SUM(SUM(Monetary)) OVER () AS DECIMAL(10,2)) AS Revenue_Percentage
+FROM
+    rfm_analysis
+GROUP BY
+    RFM_Segment
+ORDER BY
+    Total_Revenue DESC;
